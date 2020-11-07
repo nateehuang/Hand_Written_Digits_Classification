@@ -1,0 +1,282 @@
+---
+title: 'Project: Digit Recognition'
+author: "Nate Huang"
+date: "7/24/2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(readr)
+library(ggplot2)
+```
+
+I. Read the .csv
+Read and organize the data, I will use array to store and calculate
+```{r read}
+# read the data in R
+raw = read.csv("trainProject.csv")
+
+# extract the label from the raw data
+label = raw[,1]
+
+# get the pixel information, note that this is a data.frame which will be used to calculate the k-NN
+pure = raw[,-1]
+
+pureM = as.matrix(pure)
+
+mat = array(pureM, dim = c(5000, 28, 28))
+# Note that the row and column are exchanged in this way, this is for the convenince of visulizing the pic
+```
+
+II. Plot function that view image
+Plot
+```{r plot}
+
+Plot_num = function(m){
+  pic = data.frame(loc = expand.grid(1:nrow(m),ncol(m):1), mat = c(m), color = rep(NA, times = nrow(m)*ncol(m)) )
+  # flip back the columns
+  ggplot(pic)+geom_point( aes(loc.Var1, loc.Var2, alpha = mat), shape = 15, size = 8) + scale_alpha_continuous(range = c(0, 1)) + theme_bw()
+}
+
+Plot_num(mat[1,,]) #test
+```
+
+III. Cross-validation
+I use the holdout set cross validation. I pick 20% of the sample as holdout set. The rest of the sample I split them into 10 folds. 
+```{r Cross-validation}
+
+# notice when creating fold, need to include the label and separate the label and data to keep track on the following
+
+# error rates once we have decided upon a model
+set.seed(0)
+hdt_ind = sample(nrow(pure), 1000) # 1000 = 20% of 5000
+
+# Subset the label
+trainLabel = label[hdt_ind]
+testLabel = label[-hdt_ind]
+
+# Split into holdout df and a df for the cross validation
+holdout_df = raw[hdt_ind, ]
+ind = 1:5000
+crossvalid_df =data.frame(indice = ind[-hdt_ind], label = label[-hdt_ind])
+
+# Next, assign folds. There are many different ways to 
+# assign your data to v folds; here's one way:
+nFold = 10
+fold_df = data.frame( fold = rep(1:nFold, 
+                                 each = nrow(crossvalid_df)/nFold) )
+# Note - be careful if nrow(crossvalid_df)/nFold is not an integer...
+
+# Randomly order the folds
+fold_df$position = sample(nrow(fold_df))
+# and re-sort 
+fold_df = fold_df[order(fold_df$position),]
+
+# Double check that we have the correct number of observations in each fold:
+table(fold_df$fold)
+
+# Add this variable to the "crossvalid_df" data frame:
+crossvalid_df$fold = fold_df$fold
+```
+
+
+
+
+
+IV. Conduct k-nearest neighborhood classification and calculate the misclassification rate for the labeled data
+
+Distance of the sample 
+```{r}
+# This is the sample, it could be written in function
+# It is more effient than the function
+# Calculate the distance between all images
+# create a matrix which store all the distance
+distance = matrix(NA, nrow = 5000, ncol = 5000) 
+for (i in 1:4999){
+  for (j in (i+1):5000){
+    
+  # get the distance of all different images by subtract the matrix
+  # we know that distance[i,i] is 0 so no need to calculate that, leaving them to be NA does not influence the later analysis
+  distance[i, j] = sqrt(sum((mat[i,,]-mat[j,,])^2))
+  distance[j, i] = distance[i, j]
+  }
+}
+
+# All the distance was restored in this matrix
+# Subset the distance matrix once find out what testing and traning set are
+```
+
+General Distance function
+```{r}
+
+# This is for training set are different from testing set
+# The testing set is real unknown 
+caldis = function(testarray, trainarray){
+# Calculate the distance between all images
+# create a matrix which store all the distance
+distance = matrix(NA, nrow = dim(testarray)[1], ncol = dim(trainarray)[1]) 
+for (i in 1:(dim(testarray)[1])){
+  for (j in 1:dim(trainarray)[1]){
+  distance[i, j] = sqrt(sum((testarray[i,,]-trainarray[j,,])^2))
+  }
+}
+return(distance)
+# All the distance was restored in this matrix, row represents testing images and column represents training images
+# Subset the distance once find out what testing and traning set
+}
+```
+
+Find NN
+```{r}
+findNN = function(d, k){
+  # Inputs: 
+  # d          is a subset of distance matrix where testing indice by row and training indice by column
+  # k          is the number of neighbors we want
+  
+  # For each row, pick out the indices of the k nearest neighbors
+  NNmat = apply(d, 1, order)[1:k, ]
+  # Again, return the transpose: want this to be l by k
+  return(t(NNmat))
+}
+
+# Helper function for classification
+calc_mode = function(x){
+  mode_num = max(table( factor(x) )) 
+  mode_name = which( table(x) == mode_num )
+
+  # Pick out the species for the mode; use "sample" to break ties  
+  return(names(mode_name)[ sample(x = length(mode_name), size = 1) ])
+}
+
+classifyNN = function( NNmat, trainLabels ){
+  # Inputs: 
+  # NNmat        is a l x k matrix containing the NN indices
+  # trainLabels  is a vector of the known labels for the training
+  #              set observations, now a FACTOR variable
+
+  # Identify the labels of the nearest neighbors and
+  # put into a l x k matrix
+  classNN = matrix( trainLabels[ NNmat ], byrow = FALSE, ncol = ncol(NNmat))
+  # Classify based on the neighbors
+  classify = apply(classNN, 1, calc_mode)
+  return( classify )
+  # l x 1 vector
+}
+
+# Function that calculates error rate
+calcError = function( prediction_matrix, trueLabels ){
+  return( apply( as.matrix(prediction_matrix), 2, function(x){ mean(x != as.character(trueLabels))} ) )
+}
+
+```
+
+Conduct the trials 
+```{r}
+# Possible k could be 2:90
+models = 2:90 
+
+predict_kNN = function( train_ind, trainLabel, test_ind, k ){
+  
+  # Step 1: subset distances
+  sampleDist = distance[test_ind, train_ind]
+  # Step 2: find the k nearest neighbors
+  sampleNN = findNN(d = sampleDist, k = k)
+  # Step 3: classify
+  sampleClass = classifyNN( NNmat = sampleNN, trainLabels = trainLabel )
+
+  return(sampleClass)
+}
+
+# Storage: empty matrix with one row for each obs, one column
+#          for each model (ranging over k = 1,...,20)
+prediction_matrix = matrix(NA, nrow = nrow(crossvalid_df), ncol = length(models))
+
+# Condut k-NN: now using all available features
+for( f in 1:nFold ){
+  for( k in 1:length(models) ){
+    prediction_matrix[crossvalid_df$fold == f,k] = predict_kNN( 
+      train_ind = data.matrix( crossvalid_df[crossvalid_df$fold != f,1] ),
+      trainLabel = crossvalid_df$label[crossvalid_df$fold != f],
+      test_ind = data.matrix( crossvalid_df[crossvalid_df$fold == f,1] ), 
+      k = models[k] )
+  }
+  # Print progress
+  cat(f, " ")
+}
+
+```
+
+Calculate Error
+```{r}
+calcError = function( prediction_matrix, trueLabels ){
+  return( apply( as.matrix(prediction_matrix), 2, function(x){ mean(x != as.character(trueLabels))} ) )
+}
+```
+
+```{r}
+# Now, calculate misclassification rates for each model
+misclassRate = calcError( prediction_matrix, crossvalid_df$label )
+
+# and plot
+ggplot( data.frame( k = models, Error = misclassRate  ),
+  aes( x = k, y = Error ) ) + geom_line()
+```
+
+V. Model selection 
+Looking at the plot above, it appears that smaller values of `k` perform very well, with
+```{r}
+models[which.min(misclassRate)] # k = 3 wins
+```
+k = 3 is the best model for the sample
+Pick k = 3 as our model.
+
+VI. Summary of procedure
+For the Cross-validation, I first randomly pick 20% of the total data as a hold-out set. Then I divided the remaining data into 10 folds. Then, I loopped over all the folds. For model selection, I picked the range from k=2-90 because I would expected the choice of k=1 might give me a large error. As the result showen, the larger k I choose, the larger error rate I will get and k=3 gives me the least error rate. When k=3, the error rate is minimum and the error rate is 6.975%. 
+
+```{r}
+data.frame( k = models, Error = misclassRate  )[2,]
+```
+
+
+
+VII. Out of Sample Prediction
+
+Read the testing images
+```{r}
+# read the data in R
+test_image = read.csv("testProject.csv")
+
+test_M = as.matrix(test_image)
+
+test_imageArrary = array(test_M, dim = c(5000, 28, 28))
+# Note that the row and column are exchanged in this way, this is for the convenince of visulizing the pic
+```
+
+Calculate distance
+```{r}
+# Use the whole sample as training set
+test_distance = caldis(test_imageArrary, mat)
+```
+
+Find 3-NN and classify
+```{r}
+predictLabel = classifyNN(findNN(test_distance, 3), label)
+```
+
+Attach the label to the images
+```{r}
+labTestimage = data.frame(predictLabel, test_image)
+```
+
+Save the result as csv
+```{r}
+write.csv(labTestimage, file = "labeltestProject.csv")
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
